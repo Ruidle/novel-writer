@@ -62,6 +62,16 @@ exports.handler = async function(event, context) {
     };
   }
 
+  // ✅ 确保有 model 字段（DeepSeek API 必需）
+  if (!payload.model) {
+    payload.model = "deepseek-chat";
+  }
+
+  // ✅ 如果 stream 未定义，默认启用流式
+  if (payload.stream === undefined) {
+    payload.stream = true;
+  }
+
   // 转发请求到 DeepSeek API
   let response;
   try {
