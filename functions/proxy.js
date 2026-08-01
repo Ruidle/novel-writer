@@ -1,7 +1,4 @@
 // Netlify Function: DeepSeek API 代理
-// 作用:把前端请求转发给 DeepSeek,API Key 存在环境变量里,不暴露给浏览器
-// 支持流式(SSE)转发,解决浏览器跨域(CORS)问题
-
 export default async (req, context) => {
   const corsHeaders = {
     'Access-Control-Allow-Origin': '*',
@@ -9,7 +6,6 @@ export default async (req, context) => {
     'Access-Control-Allow-Headers': 'Content-Type'
   };
 
-  // 处理 CORS 预检请求
   if (req.method === 'OPTIONS') {
     return new Response(null, { status: 204, headers: corsHeaders });
   }
@@ -21,8 +17,8 @@ export default async (req, context) => {
     });
   }
 
-  // 从 Netlify 环境变量读取 API Key
-  const apiKey = process.env.DEEPSEEK_API_KEY || (context.env && context.env.DEEPSEEK_API_KEY) || (Netlify && Netlify.env && Netlify.env.get ? Netlify.env.get('DEEPSEEK_API_KEY') : null);
+  // ✅ 正确的环境变量读取方式
+  const apiKey = context.env.DEEPSEEK_API_KEY || process.env.DEEPSEEK_API_KEY;
 
   if (!apiKey) {
     return new Response(JSON.stringify({
@@ -33,7 +29,6 @@ export default async (req, context) => {
     });
   }
 
-  // 解析前端请求体
   let payload;
   try {
     payload = await req.json();
@@ -44,8 +39,8 @@ export default async (req, context) => {
     });
   }
 
-  // 转发给 DeepSeek
-  const upstream = await fetch('https://api.deepseek.com/chat/completions', {
+  // ✅ DeepSeek API 正确地址
+  const upstream = await fetch('https://api.deepseek.com/v1/chat/completions', {
     method: 'POST',
     headers: {
       'Authorization': 'Bearer ' + apiKey,
@@ -54,7 +49,6 @@ export default async (req, context) => {
     body: JSON.stringify(payload)
   });
 
-  // 非 2xx:把错误信息透传回前端
   if (!upstream.ok) {
     let errText = '';
     try { errText = await upstream.text(); } catch (e) {}
@@ -64,7 +58,6 @@ export default async (req, context) => {
     });
   }
 
-  // 流式转发:SSE 原样回传
   const stream = new ReadableStream({
     async start(controller) {
       const reader = upstream.body.getReader();
@@ -75,7 +68,7 @@ export default async (req, context) => {
           controller.enqueue(value);
         }
       } catch (e) {
-        // 客户端断开等,忽略
+        // 忽略客户端断开
       } finally {
         controller.close();
       }
