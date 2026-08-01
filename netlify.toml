@@ -1,12 +1,10 @@
 [build]
   command = "echo 'No build required'"
   publish = "."
-  functions = "netlify/functions"
 
 [functions]
   node_bundler = "esbuild"
 
-# /api/proxy 路由由 functions/proxy.js 处理
 [[redirects]]
   from = "/api/*"
   to = "/.netlify/functions/:splat"
