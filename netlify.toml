@@ -3,13 +3,16 @@
   publish = "."
 
 [functions]
+  directory = "netlify/functions"
   node_bundler = "esbuild"
 
+# /api/* 路径转发到 Netlify Functions
 [[redirects]]
   from = "/api/*"
   to = "/.netlify/functions/:splat"
   status = 200
 
+# 其他所有路径返回 index.html（SPA 支持）
 [[redirects]]
   from = "/*"
   to = "/index.html"
