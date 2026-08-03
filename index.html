@@ -525,9 +525,31 @@
   <div class="setup-actions">
     <button class="secondary" id="pauseBtn" disabled>⏸ 暂停</button>
     <button class="secondary" id="continueBtn" disabled>⏭ 继续生成</button>
+    <button class="secondary" id="importBtn">📥 导入续写</button>
     <span style="font-size:12px;color:var(--text-dim);align-self:center;margin-left:8px;">
       提示：长篇需多次调用 API，支持断点续传，可关闭后下次继续
     </span>
+  </div>
+</section>
+
+<!-- 导入续写面板 -->
+<section class="setup-section" id="importPanel" style="display:none;border-top:1px dashed var(--border);">
+  <div class="setup-title">📥 导入断更小说原稿，AI 接着续写</div>
+  <div style="font-size:12px;color:var(--text-dim);margin-bottom:10px;line-height:1.6;">
+    支持 .txt / .md 文件上传，或直接粘贴全文。系统自动按「第X章」分割章节，并调用 AI 提取设定后从最后一章之后续写。
+  </div>
+  <div style="display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap;">
+    <input type="file" id="importFile" accept=".txt,.md,text/plain" style="font-size:12px;">
+    <button class="secondary" id="importLoadFileBtn">读取文件</button>
+    <span style="font-size:11px;color:var(--text-dim);">或将内容粘贴到下方文本框</span>
+  </div>
+  <textarea id="importText" placeholder="在此粘贴小说全文（含「第X章」章节标题）..." style="width:100%;min-height:140px;background:var(--panel-2);border:1px solid var(--border);color:var(--text);padding:10px;border-radius:6px;font-size:13px;font-family:inherit;resize:vertical;"></textarea>
+  <div style="display:flex;gap:8px;margin-top:10px;align-items:center;flex-wrap:wrap;">
+    <label style="font-size:12px;color:var(--text-dim);">续写目标章节数：</label>
+    <input type="number" id="importTargetChapters" value="1000" min="10" style="width:90px;background:var(--panel-2);border:1px solid var(--border);color:var(--text);padding:6px;border-radius:4px;font-size:12px;">
+    <button class="big" id="importParseBtn">🔍 解析并提取设定</button>
+    <button class="secondary" id="importCancelBtn">取消</button>
+    <span id="importHint" style="font-size:12px;color:var(--text-dim);"></span>
   </div>
 </section>
 
@@ -595,6 +617,11 @@
     optChapters: $('optChapters'), optWords: $('optWords'),
     optGenre: $('optGenre'), optStyle: $('optStyle'),
     generateBtn: $('generateBtn'), pauseBtn: $('pauseBtn'), continueBtn: $('continueBtn'),
+    importBtn: $('importBtn'), importPanel: $('importPanel'),
+    importFile: $('importFile'), importLoadFileBtn: $('importLoadFileBtn'),
+    importText: $('importText'), importTargetChapters: $('importTargetChapters'),
+    importParseBtn: $('importParseBtn'), importCancelBtn: $('importCancelBtn'),
+    importHint: $('importHint'),
     exportTxtBtn: $('exportTxtBtn'), exportMdBt: $('exportMdBt'),
     clearBtn: $('clearBtn'), themeToggle: $('themeToggle'),
     progressText: $('progressText'), progressFill: $('progressFill'), wordCount: $('wordCount'),
@@ -1078,6 +1105,147 @@ ${specialReq}
     }
   }
 
+  // ==================== 导入续写 ====================
+  function parseImportedText(text) {
+    text = String(text).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    // 匹配章节标题：第X章（支持中文数字/阿拉伯数字，可带章名）
+    const chapterRegex = /(^|\n)\s*(第[一二三四五六七八九十百千零\d]+章[^\n]*)/g;
+    const matches = [];
+    let m;
+    while ((m = chapterRegex.exec(text)) !== null) {
+      matches.push({ title: m[2].trim(), offset: m.index + m[1].length });
+    }
+    if (matches.length === 0) {
+      // 没识别到章节标记，整篇作为第1章
+      const body = text.trim();
+      return [{ num: 1, title: '第1章', content: body, rawContent: body, status: 'done' }];
+    }
+    const chapters = [];
+    for (let i = 0; i < matches.length; i++) {
+      const start = matches[i].offset;
+      const end = i + 1 < matches.length ? matches[i + 1].offset : text.length;
+      const chunk = text.substring(start, end).trim();
+      const lineEnd = chunk.indexOf('\n');
+      const title = lineEnd >= 0 ? chunk.substring(0, lineEnd).trim() : chunk.trim();
+      const content = lineEnd >= 0 ? chunk.substring(lineEnd + 1).trim() : '';
+      chapters.push({
+        num: i + 1,                       // 重新编号为连续，保证续写章节号正确
+        title: title || ('第' + (i + 1) + '章'),
+        content: content,
+        rawContent: content,
+        status: 'done'
+      });
+    }
+    return chapters;
+  }
+
+  function buildAnalyzePrompt(sampleText) {
+    return {
+      messages: [
+        { role: 'system', content: `你是资深网文编辑。根据提供的小说原文片段，提取或合理推断该小说的设定。
+【输出格式】严格遵守，不要寒暄：
+
+【书名】（若原文看不出，根据内容拟一个贴切的书名）
+【简介】50字内，主角身份+核心冲突+金手指
+【标签】3-5个，顿号分隔（末世/系统/种田/经营/无限流/重生/穿书/科幻/都市/悬疑/爱情/玄幻）
+【主角】姓名+身份+核心能力+性格（50字内）
+【配角】3-5个，每个：姓名+身份+与主角关系（30字内）
+【反派】核心矛盾+动机（50字内）
+【世界观】背景设定+规则体系（150字内）
+【主线】分3-5个阶段，每阶段200字内描述已有/后续走向
+【分卷】共4卷，每卷：卷名（4-8字）+ 章节范围 + 该卷主线摘要（80字内）` },
+        { role: 'user', content: '小说原文片段（前几章）：\n' + sampleText + '\n\n请按上述格式提取/推断小说设定，用于后续续写。' }
+      ],
+      max_tokens: 2500, temperature: 0.75
+    };
+  }
+
+  async function importAndAnalyze() {
+    const text = els.importText.value.trim();
+    if (!text) { showToast('请粘贴原稿或读取文件', 'warn'); els.importText.focus(); return; }
+    if (text.length < 50) { showToast('文本太短，无法识别', 'warn'); return; }
+
+    els.importParseBtn.disabled = true;
+    els.importHint.textContent = '正在解析章节…';
+
+    const chapters = parseImportedText(text);
+    if (chapters.length === 0) {
+      els.importParseBtn.disabled = false;
+      els.importHint.textContent = '';
+      showToast('未识别到任何内容', 'error');
+      return;
+    }
+    els.importHint.textContent = '识别到 ' + chapters.length + ' 章，正在调用 AI 提取设定…';
+    setStatus('导入续写：已识别 ' + chapters.length + ' 章，正在提取设定…');
+
+    // 取前3章 + 最后一章作为样本（含开局和最新进展）
+    let sample = chapters.slice(0, 3).map(c => c.title + '\n' + c.content).join('\n\n');
+    if (chapters.length > 4) {
+      sample += '\n\n……（中间略）……\n\n' + chapters[chapters.length - 1].title + '\n' + chapters[chapters.length - 1].content;
+    }
+    sample = sample.slice(0, 6000);
+
+    const targetTotal = Math.max(parseInt(els.importTargetChapters.value) || 1000, chapters.length + 10);
+    const options = {
+      chapters: String(targetTotal),
+      words: els.optWords.value,
+      genre: els.optGenre.value,
+      style: els.optStyle.value
+    };
+
+    try {
+      let result = '';
+      await streamCall(buildAnalyzePrompt(sample), chunk => { result += chunk; });
+      const parsed = parseNovel(result, '导入续写', options);
+      // 覆盖分卷的章节范围，让续写章节落到最后一卷
+      const lastNum = chapters.length;
+      parsed.volumes.forEach((v, i) => {
+        if (i === parsed.volumes.length - 1) {
+          v.startChapter = lastNum + 1;
+          v.endChapter = targetTotal;
+        } else if (i === parsed.volumes.length - 2) {
+          v.endChapter = lastNum;
+        }
+      });
+      state.novel = parsed.novel;
+      state.novel.options = options;
+      state.novel.idea = '导入续写：' + (parsed.novel.title || '未命名');
+      state.volumes = parsed.volumes;
+      state.chapters = chapters;
+      state.currentChapter = chapters.length - 1;
+
+      saveState();
+      renderNovelInfo();
+      renderChapterList();
+      renderCurrentChapter();
+      updateProgress(chapters.length, targetTotal);
+
+      els.importPanel.style.display = 'none';
+      els.importParseBtn.disabled = false;
+      els.importHint.textContent = '';
+      setStatus('已导入 ' + chapters.length + ' 章《' + state.novel.title + '》，点击「继续生成」从第 ' + (lastNum + 1) + ' 章续写', 'success');
+      showToast('导入成功，可点「继续生成」续写', 'success');
+      els.continueBtn.disabled = false;
+    } catch (e) {
+      els.importParseBtn.disabled = false;
+      els.importHint.textContent = '已识别 ' + chapters.length + ' 章，但提取设定失败，可重试或检查 API Key';
+      setStatus('导入失败：' + e.message + '（已识别 ' + chapters.length + ' 章，解析本身成功）', 'error');
+      showToast('提取设定失败：' + e.message, 'error');
+    }
+  }
+
+  async function loadImportFile() {
+    const file = els.importFile.files && els.importFile.files[0];
+    if (!file) { showToast('请先选择文件', 'warn'); return; }
+    try {
+      const text = await file.text();
+      els.importText.value = text;
+      els.importHint.textContent = '已读取 ' + file.name + '（' + text.length + ' 字）';
+    } catch (e) {
+      showToast('读取文件失败：' + e.message, 'error');
+    }
+  }
+
   // ==================== 主流程 ====================
   async function generateNovelSetting() {
     const idea = els.ideaInput.value.trim();
@@ -1420,6 +1588,13 @@ ${specialReq}
     els.generateBtn.addEventListener('click', startGeneration);
     els.pauseBtn.addEventListener('click', togglePause);
     els.continueBtn.addEventListener('click', continueGeneration);
+    els.importBtn.addEventListener('click', () => {
+      els.importPanel.style.display = (els.importPanel.style.display === 'none' ? 'block' : 'none');
+      if (els.importPanel.style.display === 'block') els.importText.focus();
+    });
+    els.importCancelBtn.addEventListener('click', () => { els.importPanel.style.display = 'none'; });
+    els.importLoadFileBtn.addEventListener('click', loadImportFile);
+    els.importParseBtn.addEventListener('click', importAndAnalyze);
     els.exportTxtBtn.addEventListener('click', exportTxt);
     els.exportMdBt.addEventListener('click', exportMd);
     els.clearBtn.addEventListener('click', clearAll);
